@@ -1,0 +1,8 @@
+# مثال لتهيئة التفاعلات بدون تعديل الكود
+max_clicks_per_page: 20
+selectors_force_click:
+  - "#themeToggle"
+  - ".open-gallery"
+anchor_click: true
+theme_toggle_keywords: ["dark","light","theme","mode","night","day"]
+open_modals_keywords: ["modal","popup","dialog","lightbox"]
