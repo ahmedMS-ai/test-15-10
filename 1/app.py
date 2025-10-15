@@ -1,68 +1,73 @@
-# app.py
+import os, sys, subprocess, traceback
 import streamlit as st
 from pathlib import Path
-import shutil
-from snapshotper import UltraSnapshotter, ts_name
-from utils import zip_dir, slugify
 
-st.set_page_config(page_title="Web Snapshotter Pro", layout="centered")
-st.title("🧩 Web Snapshotter Pro (Playwright)")
-st.caption("لقطة أوفلاين لصفحات ديناميكية مع تفاعلات ذكية وكاش API اختياري.")
-
-url = st.text_input("ضع الرابط", value="https://felo.ai/en/page/preview/KrcyXakexYzy3cNL2rGJKC?business_type=AGENT_THREAD")
-
-c1, c2 = st.columns(2)
-mode = c1.selectbox("وضع الالتقاط", ["static", "interactive", "singlefile"], help="""
-static: DOM بعد التنفيذ بدون SPA
-interactive: + كاش JSON و fetch patch
-singlefile: ملف HTML واحد مكتفٍ (يبني على interactive)
-""")
-max_pages = c2.slider("عدد الصفحات القصوى (نفس الدومين)", 1, 10, 3)
-
-c3, c4 = st.columns(2)
-wait = c3.slider("زمن الانتظار (ms)", 600, 4000, 1600, 100)
-scrolls = c4.slider("تمرير Lazy (مرات)", 2, 30, 12, 1)
-
-c5, c6 = st.columns(2)
-slow_mo = c5.slider("تبطيء التفاعل (ms)", 0, 300, 0, 10, help="يزود الاستقرار لمواقع حساسة للتوقيت")
-follow_sub = c6.checkbox("تتبّع Sub-pages داخل نفس الدومين", True)
-
-job_name = st.text_input("اسم الحفظ (اختياري)")
-interactions_file = st.file_uploader("ملف interactions.yaml (اختياري)", type=["yaml","yml"])
-
-btn = st.button("ابدأ الالتقاط", type="primary")
-
-if btn and url.strip():
-    # حفظ ملف التخصيص إن تم رفعه
-    inter_path = None
-    if interactions_file:
-        inter_path = Path("interactions.yaml")
-        inter_path.write_bytes(interactions_file.read())
-
-    folder = Path(ts_name("snapshot")) if not job_name else Path(slugify(job_name))
-    snap = UltraSnapshotter(
-        out_dir=folder, mode=mode, wait_idle_ms=wait, scroll_passes=scrolls,
-        slow_mo=slow_mo, same_domain_only=True, follow_subpages=follow_sub,
-        max_pages=max_pages, interactions_yaml=inter_path
-    )
+# محاولة تنزيل المتصفح عند بدء التشغيل (صامتة)
+def _ensure_chromium_silent():
     try:
+        # تسريع التحميل بين التشغيلات (اختياري)
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(Path.home() / ".cache" / "ms-playwright"))
+        os.environ.setdefault("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+_ensure_chromium_silent()
+
+st.set_page_config(page_title="Web Snapshotter", layout="centered")
+st.title("🧩 Web Snapshotter")
+st.caption("نسخة أوفلاين ثابتة لصفحات ديناميكية (DOM بعد التنفيذ + أصول محليّة).")
+
+url = st.text_input("ضع الرابط:", value="https://felo.ai/en/page/preview/KrcyXakexYzy3cNL2rGJKC?business_type=AGENT_THREAD")
+go = st.button("ابدأ الالتقاط", type="primary")
+
+# “إعدادات متقدمة” (افتراضيًا مخفية) — للمحترفين فقط
+with st.expander("إعدادات متقدمة (اختياري)", expanded=False):
+    wait_ms = st.slider("زمن الانتظار لكل خطوة (ms)", 800, 4000, 1600, 100)
+    max_scrolls = st.slider("تمرير Lazy (أقصى مرات)", 3, 30, 14, 1)
+
+# القيم الافتراضية الذكية لو المستخدم ما فتحش الإكسباندر
+wait_ms = locals().get("wait_ms", 1600)
+max_scrolls = locals().get("max_scrolls", 14)
+
+def ensure_browser_then(func, *args, **kwargs):
+    """يشغّل func، ولو فشل بسبب عدم وجود المتصفح: ينزّل Chromium ويعيد المحاولة مرّة واحدة."""
+    from playwright.sync_api import Error as PWError
+    tried_install = False
+    for attempt in (1, 2):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            msg = str(e)
+            needs_install = ("Executable doesn't exist" in msg) or ("playwright install" in msg)
+            if needs_install and not tried_install:
+                tried_install = True
+                subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False)
+                continue
+            raise
+
+if go and url.strip():
+    try:
+        # import هنا لتقليل وقت الإقلاع
+        from snapshotper import StaticSnapshotter, ts_name
+        out_dir = Path(ts_name("snapshot"))
+
+        def _run():
+            snap = StaticSnapshotter(out_dir=out_dir, wait_idle_ms=wait_ms, scroll_passes=max_scrolls)
+            return snap.run(url)
+
         with st.spinner("جاري الالتقاط عبر متصفح حقيقي…"):
-            result = snap.run(url)
+            folder = ensure_browser_then(_run)
+
+        st.success("تم الانتهاء ✅")
+        # ضغط المجلد وإتاحة التحميل
+        from utils import zip_dir
+        zip_path = zip_dir(folder)
+        with open(zip_path, "rb") as f:
+            st.download_button("⬇️ تنزيل ZIP", f, file_name=Path(zip_path).name)
+
+        st.info("لو واجهت مشكلة مع file:// شغّل محليًا:\n`python -m http.server 8000` ثم افتح `http://localhost:8000/index_offline.html`")
+
     except Exception as e:
-        st.error(f"❌ حدث خطأ أثناء الالتقاط:\n\n{e}")
-        st.stop()
-
-    st.success("تم الانتهاء ✅")
-    zip_path = zip_dir(result["out_dir"])
-    with open(zip_path, "rb") as f:
-        st.download_button("⬇️ تنزيل ZIP", f, file_name=Path(zip_path).name)
-
-    if result.get("single_file"):
-        p = Path(result["single_file"])
-        with open(p, "rb") as f:
-            st.download_button("⬇️ تنزيل Single-File HTML", f, file_name=p.name)
-
-    st.info(
-        "لو واجهت مشكلة مع file:// شغّل محليًا:\n\n"
-        "`python -m http.server 8000`\nثم افتح: `http://localhost:8000/index_offline.html`"
-    )
+        st.error("❌ حدث خطأ أثناء الالتقاط:\n" + "".join(traceback.format_exception_only(type(e), e)))
